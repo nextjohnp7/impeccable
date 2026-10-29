@@ -48,7 +48,9 @@ Verify: `bun --version` → `1.3.13`. If it differs, run `bun upgrade --to 1.3.1
 - [ ] **Step 2: Install Rust and the wasm target**
 
 Run: `winget install Rustlang.Rustup` (or `rustup-init`), then `rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy` and `rustup target add wasm32-unknown-unknown --toolchain 1.99.1`.
-Verify: `rustc --version` → `rustc 1.99.1`; `rustup target list --installed --toolchain 1.99.1` includes `wasm32-unknown-unknown`.
+Verify: `RUSTUP_TOOLCHAIN=1.99.1 rustc --version` → `rustc 1.99.1`; `rustup target list --installed --toolchain 1.99.1` includes `wasm32-unknown-unknown`.
+
+Installing a toolchain does not select it: `rust-toolchain.toml` pins `stable`, so a bare `cargo` keeps using stable. Export `RUSTUP_TOOLCHAIN=1.99.1` for every cargo and rustfmt command in this plan, including the baseline below, so local runs match `fork-gates`. Do not edit `rust-toolchain.toml`.
 
 - [ ] **Step 3: Install Chrome for the detector tests**
 
@@ -57,7 +59,7 @@ Verify: the command exits `0` and prints a binary path.
 
 - [ ] **Step 4: Prove this tree is green before changing it**
 
-Run in order: `bun install`, then `bun run build`, then `cargo build --workspace --all-targets`, then `cargo test --workspace` (let it run in the background; ~10 minutes according to `AGENTS.md`), then `bun run fetch:engine`, then `bun run test`.
+With `RUSTUP_TOOLCHAIN=1.99.1` exported, run in order: `bun install`, then `bun run build`, then `cargo build --workspace --all-targets`, then `cargo test --workspace` (let it run in the background; ~10 minutes according to `AGENTS.md`), then `bun run fetch:engine`, then `bun run test`.
 Expected: everything exits `0`. If something fails **before** any task below is done, stop and report it — that is the upstream baseline, not a mistake in this plan.
 
 - [ ] **Step 5: Record the results**
@@ -131,7 +133,7 @@ Expected: FAIL — `ENOENT` for `docs/FORK.md`.
 
 - [ ] **Step 3: Write `docs/FORK.md`**
 
-Required content, any order: what this fork is and is not (it is not a request to PR upstream); the branch model (`main` mirrors, `fork/main` integrates, `fork/<topic>` is where work happens); the sync commands (`git fetch upstream`, `git switch main`, `git merge --ff-only upstream/main`, `git push origin main`) and the invariant `git rev-list --count upstream/main..main` → `0`; the rebase commands for a work branch; the two workflows disabled through the Actions tab and why; local prerequisites with the versions from Task 1; verification commands (`cargo test --workspace`, `bun run test`, `node --test tests/fork`); the gate base ref (`IMPECCABLE_FORK_BASE`, default `origin/fork/main`); a note that the 1,483 `//! JS:` comments point at upstream JS sources, not at files in this checkout; the "no behaviour change" rule and the list of files that must not be touched.
+Required content, any order: what this fork is and is not (it is not a request to PR upstream); the branch model (`main` mirrors, `fork/main` integrates, `fork/<topic>` is where work happens); the sync commands (`git fetch upstream`, `git switch main`, `git merge --ff-only upstream/main`, `git push origin main`) and the invariant `git rev-list --count upstream/main..main` → `0`; the rebase commands for a work branch; the two workflows disabled through the Actions tab and why; local prerequisites with the versions from Task 1; verification commands (`cargo test --workspace`, `bun run test`, `node --test tests/fork`); the gate base ref (`IMPECCABLE_FORK_BASE`, default `origin/fork/main`); the `RUSTUP_TOOLCHAIN=1.99.1` override and why it is needed (the repo pins `stable`, and installing a toolchain does not select it); a note that the 1,483 `//! JS:` comments point at upstream JS sources, not at files in this checkout; the "no behaviour change" rule and the list of files that must not be touched.
 
 - [ ] **Step 4: Run the test, confirm it passes**
 
@@ -241,6 +243,17 @@ describe('parseUnifiedDiff', () => {
     const map = parseUnifiedDiff(['--- "a/dir with space/f.rs"', '+++ "b/dir with space/f.rs"', '@@ -1,1 +1,2 @@'].join('\n'));
     assert.deepEqual(map.get('dir with space/f.rs'), [[1, 2]]);
   });
+
+  it('parses a CRLF diff', () => {
+    const map = parseUnifiedDiff([
+      'diff --git a/src/a.rs b/src/a.rs',
+      '--- a/src/a.rs',
+      '+++ b/src/a.rs',
+      '@@ -1,1 +1,2 @@',
+    ].join('\r\n'));
+    assert.deepEqual([...map.keys()], ['src/a.rs']);
+    assert.deepEqual(map.get('src/a.rs'), [[1, 2]]);
+  });
 });
 
 describe('isChanged', () => {
@@ -260,8 +273,8 @@ describe('path helpers', () => {
   it('normalises windows separators', () => {
     assert.equal(toPosix('crates\\core\\src\\lib.rs'), 'crates/core/src/lib.rs');
   });
-  it('unescapes git quoting', () => {
-    assert.equal(unescapeGitPath('"b/a\\tb\\303\\251.rs"'), 'a\tb\u00e9.rs');
+  it('unescapes git quoting without stripping the b/ prefix', () => {
+    assert.equal(unescapeGitPath('"b/a\\tb\\303\\251.rs"'), 'b/a\tb\u00e9.rs');
   });
 });
 ```
@@ -273,7 +286,7 @@ Expected: FAIL — `Cannot find module .../scripts/fork/lib/changed-ranges.mjs`.
 
 - [ ] **Step 3: Implement `scripts/fork/lib/changed-ranges.mjs`**
 
-Binding rules: ignore `+++ /dev/null` lines; do not create an entry for a hunk whose `+count` is `0`; take the path from `+++ b/...` (not from `diff --git`); strip the `b/` prefix only if present; support multiple hunks per file; octal escapes in `unescapeGitPath` are read as bytes and then UTF-8 decoded (`Buffer.from(bytes)`).
+Binding rules: ignore `+++ /dev/null` lines; do not create an entry for a hunk whose `+count` is `0`; take the path from `+++ b/...` (not from `diff --git`); strip the `b/` prefix only if present; support multiple hunks per file; octal escapes in `unescapeGitPath` are read as bytes and then UTF-8 decoded (`Buffer.from(bytes)`). Strip a trailing `\r` from every header line so a CRLF diff parses exactly like an LF one. `unescapeGitPath` decodes quotes and escapes only; the `b/` prefix is stripped afterwards, inside `parseUnifiedDiff`.
 
 - [ ] **Step 4: Run the test, confirm it passes**
 
@@ -413,7 +426,7 @@ git commit -m "Add: per-line quality gate for fork"
 
 **Interfaces:**
 - Consumes: the Task 5 CLI; base ref `origin/fork/main`.
-- Produces: a required check named `gates` for PRs into `fork/main`.
+- Produces: two required checks, `gates` and `suite`, for PRs into `fork/main`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -421,11 +434,13 @@ git commit -m "Add: per-line quality gate for fork"
 // exact assertions:
 // - every `uses:` in the file matches /@[a-f0-9]{40}$/  (the same rule as tests/workflow-security.test.js)
 // - the text contains 'node-version: 24'
-// - the text contains '1.99.1' and 'rustup component add rustfmt clippy'
+// - the text contains 'rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy'
+// - the text contains 'RUSTUP_TOOLCHAIN: 1.99.1'
 // - the text contains 'node scripts/fork/check-changed.mjs'
 // - the text contains 'permissions:' followed by 'contents: read'
 // - the text contains 'branches: [fork/main]' and 'pull_request:'
 // - the text contains 'fetch-depth: 0'
+// - the text contains 'suite:' and 'cargo test --workspace'
 ```
 
 - [ ] **Step 2: Run the test, confirm it fails**
@@ -435,7 +450,9 @@ Expected: FAIL — `ENOENT` for the workflow.
 
 - [ ] **Step 3: Write `.github/workflows/fork-gates.yml`**
 
-Structure: `name: fork-gates`; triggers `pull_request` and `push` on `fork/main`; `permissions: { contents: read }`; a single `gates` job on `ubuntu-latest`; a checkout step with `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` and `fetch-depth: 0`; Node setup with `actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0` and `node-version: 24`; `rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy`; run `node scripts/fork/check-changed.mjs --base origin/fork/main`. Do not add other jobs, do not touch `ci.yml`.
+Structure: `name: fork-gates`; triggers `pull_request` and `push` on `fork/main`; `permissions: { contents: read }`; two jobs on `ubuntu-latest`; a checkout step with `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` and `fetch-depth: 0`; Node setup with `actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0` and `node-version: 24`; `rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy`; job-level `env: RUSTUP_TOOLCHAIN: 1.99.1`.
+
+Job `gates` runs `node scripts/fork/check-changed.mjs --base origin/fork/main`. Job `suite` exists because `ci.yml` only triggers on `main`, so a PR into `fork/main` would otherwise get no build or test coverage at all: it runs `bun install`, `bun run build`, `cargo test --workspace`, `bun run fetch:engine`, `bun run test`, in that order. Do not copy the upstream Node matrix, the Windows legs, or live-e2e into this file; those stay in `ci.yml` and apply to `main` only. Do not touch `ci.yml`.
 
 - [ ] **Step 4: Run the new test and the existing workflow security test**
 
@@ -511,6 +528,7 @@ git commit -m "Fix: hide generated provider diffs"
 - [ ] `bun test tests/workflow-security.test.js tests/readme-gitignore.test.mjs` → PASS (no regressions)
 - [ ] `cargo test --workspace` → exit `0`
 - [ ] `git rev-list --count upstream/main..main` → `0`
+- [ ] A PR into `fork/main` shows both `gates` and `suite` green
 - [ ] `git diff --stat upstream/main fork/main` touches only: `docs/FORK.md`, `docs/superpowers/**`, `scripts/fork/**`, `tests/fork*.test.mjs`, `tests/fork/**`, `.github/workflows/fork-gates.yml`, `.gitattributes`
 
 Do not open a PR against `pbakaus/impeccable`. PRs target this fork's `fork/main` only.

@@ -54,6 +54,8 @@ touch files upstream is actively working on**.
 | 2,480 `unwrap()` calls in `src`, `panic = "abort"` | `clippy::unwrap_used` is unrealistic; the gate has to be selective |
 | 209 entries in `Cargo.lock` | Clippy in the gate can be slow; limit it to changed crates |
 | Bun & Cargo are not installed on the working machine | Phase 0 is a prerequisite, not optional |
+| `ci.yml` triggers only on `push`/`pull_request` to `main` | Fork PRs get no upstream checks; `fork-gates` has to carry them |
+| `rust-toolchain.toml` pins `stable` | Installing 1.99.1 does not select it; the gate needs `RUSTUP_TOOLCHAIN` |
 
 ## 6. Approaches considered
 
@@ -107,13 +109,19 @@ touch files upstream is actively working on**.
    the gate** (fail-open), because a false failure on old code costs far more than one missed
    finding. Consequence: no baseline file is needed, and the `suspicious`/`style`/`perf` lint
    groups can be enabled from day one even though the old code is not clean.
-8. **Upstream `ci.yml` is left untouched.** `fork-gates` is a separate, additive job that is
-   made a required check. Trimming `ci.yml` (Node matrix, Windows, live-e2e) is deferred until
-   it proves slow; it is also a file upstream touches often.
+8. **Upstream `ci.yml` is left untouched, but it does not cover fork PRs.** Its only triggers
+   are `push` and `pull_request` on `main`, so work landing on `fork/main` gets no upstream
+   build or test run. `fork-gates` therefore carries two required jobs: `gates` (the per-line
+   quality gate) and `suite` (`bun install`, `bun run build`, `cargo test --workspace`,
+   `bun run fetch:engine`, `bun run test`). `suite` deliberately omits the upstream Node
+   matrix, the Windows legs, and live-e2e; those stay in `ci.yml` and apply to `main` only.
+   Trimming `ci.yml` itself is deferred because it is a file upstream touches often.
 9. **Versions are pinned only in fork-owned files.** The Rust toolchain is pinned inside
-   `.github/workflows/fork-gates.yml`, Biome runs as `bunx @biomejs/biome@<pinned-version>`.
-   `rust-toolchain.toml`, `package.json`, and `bun.lock` are not touched so there is no conflict
-   every time upstream bumps a dependency.
+   `.github/workflows/fork-gates.yml` as `RUSTUP_TOOLCHAIN: 1.99.1`, because installing a
+   toolchain does not select it — `rust-toolchain.toml` pins `stable` and is left untouched.
+   Biome runs as `bunx @biomejs/biome@<pinned-version>`. `rust-toolchain.toml`, `package.json`,
+   and `bun.lock` are not touched so there is no conflict every time upstream bumps a
+   dependency.
 
 ## 8. Phase plan
 
@@ -154,6 +162,8 @@ does not have. Out of scope for this document.
 - `main` is still identical to `upstream/main` (`git diff --quiet upstream/main main`).
 - Diffs on `fork/*` branches no longer show the contents of generated directories.
 - `cargo test --workspace` + `tests/oracle/run.mjs` are green on the working branch.
+- A PR into `fork/main` shows both `gates` and `suite` green, so the missing upstream triggers
+  no longer leave fork work unchecked.
 
 ## 10. Left to the builder
 
@@ -171,7 +181,7 @@ does not have. Out of scope for this document.
 | 1 | Integration branch | `fork/main`, PRs target it (§7.1) |
 | 2 | Dangerous upstream workflows | Disable via GitHub settings, record in `FORK.md` (§7.6) |
 | 3 | Gate granularity | Per-line attribution from spans/hunks, fail-open (§7.7) |
-| 4 | Is the full `ci.yml` still required? | Yes, unchanged; `fork-gates` is additive (§7.8) |
+| 4 | Is the full `ci.yml` still required? | Yes, unchanged — but it never runs on `fork/main`; `fork-gates` carries `gates` + `suite` (§7.8) |
 | 5 | Tool pins | Fork-owned files only; `bunx` for Biome (§7.9) |
 | 6 | Is Clippy `correctness`-only pointless? | It is not used; per-line attribution makes the warn groups safe to enable (§7.7) |
 | 7 | Phase 3 scope | `-diff` only; verify with `build:release` (Phase 3) |
